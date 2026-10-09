@@ -73,7 +73,8 @@ class PhemeMiddleware(object):
         if strutils.bool_from_string(_option(conf, 'metrics_enabled')):
             statsd = _metrics.create_statsd_client(
                 _option(conf, 'service_type') or 'unknown', self._log)
-        self.counters = _metrics.Counters(self._log, statsd)
+        self.counters = _metrics.Counters(self._log, statsd,
+                                          _option(conf, 'stats_file'))
         self.publisher = None
         if not self.enabled:
             self._log.info("pheme middleware disabled")

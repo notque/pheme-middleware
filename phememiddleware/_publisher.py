@@ -60,7 +60,8 @@ class Publisher(object):
     def __init__(self, build, servers, user, password, publish_timeout,
                  queue_size, counters, log, connect_timeout=2.0,
                  reconnect_wait=2.0, poll_interval=0.02,
-                 flush_interval=10.0, resolve_after=10.0):
+                 flush_interval=10.0, resolve_after=10.0,
+                 stats_interval=1.0):
         """Configure the publisher. The thread starts on first submit."""
         self._build = build
         self._servers = servers
@@ -75,6 +76,7 @@ class Publisher(object):
         self._poll_interval = poll_interval
         self._flush_interval = flush_interval
         self._resolve_after = resolve_after
+        self._stats_interval = stats_interval
 
         self._start_lock = _compat.threading.Lock()
         self._pid = None
@@ -146,13 +148,17 @@ class Publisher(object):
 
     async def _main(self):
         connector = asyncio.ensure_future(self._connect_loop())
-        last_flush = time.monotonic()
+        last_flush = last_stats = time.monotonic()
+        self._counters.write_file()
         try:
             while not self._stopping:
                 now = time.monotonic()
                 if now - last_flush >= self._flush_interval:
                     last_flush = now
                     self._counters.flush()
+                if now - last_stats >= self._stats_interval:
+                    last_stats = now
+                    self._counters.write_file()
                 try:
                     facts = self._queue.get_nowait()
                 except _compat.Empty:
@@ -162,6 +168,7 @@ class Publisher(object):
         finally:
             connector.cancel()
             self._counters.flush()
+            self._counters.write_file()
             if self._nc is not None:
                 try:
                     await asyncio.wait_for(self._nc.close(), 1.0)

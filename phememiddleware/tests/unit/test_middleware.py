@@ -13,6 +13,7 @@
 """The request-thread side: capture, skip, hand-off and drops."""
 
 import json
+import os
 import threading
 import time
 from unittest import mock
@@ -274,3 +275,25 @@ class TestCounters(base.TestCase):
         self.assertEqual(2, statsd.increment.call_count)
         self.assertEqual({'published': 1, 'dropped.buffer_full': 2},
                          counters.snapshot())
+
+    def test_write_file_per_pid(self):
+        """The stats file holds every counter, one file per pid."""
+        tmp = self.useFixture(fixtures.TempDir()).path
+        counters = _metrics.Counters(
+            self.log, stats_file=os.path.join(tmp, 'neutron-{pid}.json'))
+        counters.inc(_metrics.PUBLISHED)
+        counters.inc(_metrics.DROPPED, 'publish_failed')
+        counters.write_file()
+        path = os.path.join(tmp, 'neutron-%d.json' % os.getpid())
+        with open(path) as f:
+            data = json.load(f)
+        self.assertEqual(os.getpid(), data['pid'])
+        self.assertEqual({'published': 1, 'dropped.publish_failed': 1},
+                         data['counters'])
+        self.assertEqual([os.path.basename(path)], os.listdir(tmp))
+
+    def test_write_file_disabled_or_failing(self):
+        """No path writes nothing; an unwritable path never raises."""
+        _metrics.Counters(self.log).write_file()
+        _metrics.Counters(
+            self.log, stats_file='/nonexistent/dir/{pid}.json').write_file()

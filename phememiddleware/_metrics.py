@@ -13,7 +13,9 @@
 """In-process counters, flushed to statsd and the log by the worker."""
 
 import collections
+import json
 import os
+import time
 
 from phememiddleware import _compat
 
@@ -30,10 +32,15 @@ class Counters(object):
     client is never shared between OS threads.
     """
 
-    def __init__(self, log, statsd=None):
-        """Create empty counters with an optional statsd client."""
+    def __init__(self, log, statsd=None, stats_file=None):
+        """Create empty counters with an optional statsd client.
+
+        ``stats_file`` is a path template; ``{pid}`` is replaced by the
+        worker's pid, so each uwsgi worker writes its own file.
+        """
         self._log = log
         self._statsd = statsd
+        self._stats_file = stats_file
         self._lock = _compat.threading.Lock()
         self._counts = collections.Counter()
         self._flushed = collections.Counter()
@@ -72,6 +79,26 @@ class Counters(object):
                                   "(reason=%(reason)s, total=%(total)d)",
                                   {'delta': delta, 'reason': reason,
                                    'total': value})
+
+    def write_file(self):
+        """Write all counters as JSON to the stats file, if one is set.
+
+        The file is replaced atomically, so a reader never sees a partial
+        write. Only the publisher thread calls this. Errors are logged at
+        debug level and never raised: the stats file is a demo aid.
+        """
+        if not self._stats_file:
+            return
+        pid = os.getpid()
+        path = self._stats_file.replace('{pid}', str(pid))
+        tmp = '%s.tmp' % path
+        data = {'pid': pid, 'time': time.time(), 'counters': self.snapshot()}
+        try:
+            with open(tmp, 'w') as f:
+                json.dump(data, f, sort_keys=True)
+            os.replace(tmp, path)
+        except OSError:
+            self._log.debug("pheme: writing %s failed", path, exc_info=True)
 
 
 def create_statsd_client(service_type, log):

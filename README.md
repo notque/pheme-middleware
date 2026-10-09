@@ -14,7 +14,7 @@ nats_url = nats://nats:4222
 nats_user = neutron
 # nats_password, region (local), queue_size (1000), publish_timeout (2.0),
 # enabled (true), service_type (from the audit map), owner_cache_size (10000),
-# metrics_enabled (false), keystone_auth_url, keystone_username,
+# metrics_enabled (false), stats_file, keystone_auth_url, keystone_username,
 # keystone_password, keystone_project_name (service),
 # keystone_user_domain_name / keystone_project_domain_name (Default),
 # keystone_region_name
@@ -60,6 +60,8 @@ Pheme resolves the path itself.
 ### Counters
 
 `PhemeMiddleware.get_counters()` gives `published`, `by_id_delete` and `dropped.<reason>`. The reasons are `buffer_full`, `publish_failed`, `owner_unknown`, `domain_unknown`, `unresolved`, `build_failed` and `capture_failed`. With `metrics_enabled`, the same counters go to statsd (`openstack_pheme.events_*`), and drops are logged as warnings.
+
+With `stats_file` (for example `/var/lib/pheme-stats/neutron-{pid}.json`), the publisher thread also writes all counters as JSON (`{"pid", "time", "counters"}`) to that file once a second, replaced atomically. `{pid}` gives each uwsgi worker its own file; a reader sums the files it finds fresh. Nothing is served over the API: the file is only visible to whoever can read that path (the local demo console mounts it read-only).
 
 ### Eventlet and uwsgi
 
