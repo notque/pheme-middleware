@@ -1,0 +1,10 @@
+pbr>=2.0.0 # Apache-2.0
+# The public audit map parser (auditmiddleware.auditmap). Install the sibling
+# clone of notque/pheme-audit-middleware first; see README.md.
+audit-middleware # Apache-2.0
+cloudevents>=1.10.0 # Apache-2.0
+keystoneauth1>=3.4.0 # Apache-2.0
+nats-py>=2.6.0 # Apache-2.0
+oslo.log>=3.36.0 # Apache-2.0
+oslo.utils>=3.33.0 # Apache-2.0
+WebOb>=1.7.1 # MIT

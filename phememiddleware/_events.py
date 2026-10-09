@@ -21,9 +21,9 @@ import json
 import urllib.parse
 import uuid
 
+from auditmiddleware import auditmap
 import webob
 
-from auditmiddleware import _api
 from phememiddleware import _metrics
 
 try:
@@ -38,10 +38,6 @@ except ImportError:
 Facts = collections.namedtuple('Facts', [
     'method', 'path', 'status', 'time', 'token_project_id',
     'token_domain_id', 'user_id', 'roles', 'request_id', 'body'])
-
-# Result of resolving a request path with the audit map.
-Resolution = collections.namedtuple('Resolution', [
-    'res_spec', 'res_id', 'res_parent_id', 'suffix', 'target_project'])
 
 # A ready-to-publish message.
 Event = collections.namedtuple('Event', [
@@ -99,15 +95,6 @@ def _format_time(ts):
     return ts.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
 
-class _Resolver(_api.OpenStackAuditMiddleware):
-    """Reuse the audit map path parser, without building CADF events."""
-
-    def _create_events(self, target_project, res_id, res_parent_id,
-                       res_spec, request, response, suffix=None):
-        return Resolution(res_spec, res_id, res_parent_id, suffix,
-                          target_project)
-
-
 Owner = collections.namedtuple('Owner', ['project_id', 'domain_id', 'data'])
 
 
@@ -155,23 +142,21 @@ class EventBuilder(object):
                  service_type=None, domain_lookup=None,
                  owner_lookup=None, owner_cache_size=10000):
         """Load the audit map and remember the event source identity."""
-        self._resolver = _Resolver(audit_map_file, False, False, log)
+        # the public audit map parser from openstack-audit-middleware
+        self._resolver = auditmap.Resolver(audit_map_file, log)
         self._log = log
         self._counters = counters
         self._domain_lookup = domain_lookup
         self._owner_lookup = owner_lookup
         self._owners = _OwnerCache(owner_cache_size)
-        self.service_type = service_type or self._resolver._service_type
-        self.service_name = self._resolver._service_name
+        self.service_type = service_type or self._resolver.service_type
+        self.service_name = self._resolver.service_name
         self.source = 'openstack/%s/%s' % (self.service_name, region)
 
     def resolve(self, method, path):
         """Resolve a request path to the audit map resource spec."""
-        request = webob.Request.blank(path, method=method)
-        res = self._resolver.create_events(request)
-        if isinstance(res, Resolution):
-            return res
-        return None
+        return self._resolver.resolve(
+            webob.Request.blank(path, method=method))
 
     def build(self, facts):
         """Return the list of Events for one request (often empty)."""
@@ -270,7 +255,7 @@ class EventBuilder(object):
             rid = res.res_id
             if not rid and isinstance(data, dict):
                 rid = data.get(res.res_spec.id_field)
-            segments = kind.segments(rid, res.res_parent_id)
+            segments = kind.segments(rid, res.parent_id)
             if not rid or None in segments:
                 self._counters.inc(_metrics.DROPPED, 'unresolved')
                 continue
@@ -283,7 +268,7 @@ class EventBuilder(object):
             if (cached is None and kind.parent is not None and
                     not (isinstance(hint, dict) and
                          (hint.get('project_id') or hint.get('tenant_id')))):
-                parent = self._parent_owner(kind, res.res_parent_id)
+                parent = self._parent_owner(kind, res.parent_id)
             project_id, domain_id, reason = self._owner(facts, cached, hint,
                                                         parent)
             if reason and verb == DELETED:
