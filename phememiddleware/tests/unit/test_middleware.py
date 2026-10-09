@@ -43,6 +43,7 @@ def _environ(method):
             'HTTP_X_PROJECT_ID': base.PROJECT,
             'HTTP_X_PROJECT_DOMAIN_ID': base.DOMAIN,
             'HTTP_X_USER_ID': base.USER,
+            'HTTP_X_ROLES': 'member',
             'openstack.request_id': base.REQUEST_ID}
 
 
@@ -99,19 +100,15 @@ class TestMiddleware(base.TestCase):
         self.assertIsInstance(facts.body, bytes)
         self.assertEqual({'router': base.router()}, json.loads(facts.body))
 
-    def test_neutron_original_resources_are_captured(self):
-        """The pre-change object from Neutron's policy hook is kept."""
-        @webob.dec.wsgify
-        def app(req):
-            req.context = {'original_resources': [base.router()]}
-            return webob.Response(status=204)
-
-        mw = self.make(app)
+    def test_delete_captures_no_body(self):
+        """A 204 DELETE hands over facts without a body."""
+        mw = self.make(_app(status=204))
         with mock.patch.object(mw.publisher, 'submit') as submit:
             self.call(mw, 'DELETE', '/v2.0/routers/' + base.ROUTER)
         facts = submit.call_args[0][0]
-        self.assertEqual([base.router()], facts.original)
+        self.assertEqual('DELETE', facts.method)
         self.assertIsNone(facts.body)
+        self.assertEqual('member', facts.roles)
 
     def test_failed_requests_are_skipped(self):
         """Non-2xx responses produce no event."""

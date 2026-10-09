@@ -33,6 +33,8 @@ DOMAIN = 'd1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1'
 PROJECT = 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1'
 OTHER_PROJECT = 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2'
 OTHER_DOMAIN = 'd2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2'
+ADMIN_PROJECT = 'e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5'
+ADMIN_DOMAIN = 'default'
 USER = 'c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3'
 ROUTER = '11111111-1111-1111-1111-111111111111'
 BGPVPN = '22222222-2222-2222-2222-222222222222'
@@ -69,7 +71,7 @@ def router_association(**kw):
     return obj
 
 
-def make_facts(method, path, body=None, status=200, original=None,
+def make_facts(method, path, body=None, status=200, roles='member',
                token_project_id=PROJECT, token_domain_id=DOMAIN):
     """Build request facts as the middleware captures them."""
     if body is not None and not isinstance(body, bytes):
@@ -77,7 +79,7 @@ def make_facts(method, path, body=None, status=200, original=None,
     return _events.Facts(method=method, path=path, status=status, time=NOW,
                          token_project_id=token_project_id,
                          token_domain_id=token_domain_id, user_id=USER,
-                         request_id=REQUEST_ID, body=body, original=original)
+                         roles=roles, request_id=REQUEST_ID, body=body)
 
 
 def free_port():

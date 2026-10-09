@@ -142,6 +142,7 @@ def _environ(method):
             'HTTP_X_PROJECT_ID': base.PROJECT,
             'HTTP_X_PROJECT_DOMAIN_ID': base.DOMAIN,
             'HTTP_X_USER_ID': base.USER,
+            'HTTP_X_ROLES': 'member',
             'openstack.request_id': base.REQUEST_ID}
 
 
@@ -168,7 +169,6 @@ class TestNatsPublish(base.TestCase):
         @webob.dec.wsgify
         def app(req):
             if req.method == 'DELETE':
-                req.context = {'original_resources': [base.router()]}
                 return webob.Response(status=204)
             resp = webob.Response(status=201 if req.method == 'POST' else 200)
             resp.content_type = 'application/json'

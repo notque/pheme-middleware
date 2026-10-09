@@ -37,7 +37,7 @@ except ImportError:
 # The raw facts captured on the request thread. Nothing here is parsed yet.
 Facts = collections.namedtuple('Facts', [
     'method', 'path', 'status', 'time', 'token_project_id',
-    'token_domain_id', 'user_id', 'request_id', 'body', 'original'])
+    'token_domain_id', 'user_id', 'roles', 'request_id', 'body'])
 
 # Result of resolving a request path with the audit map.
 Resolution = collections.namedtuple('Resolution', [
@@ -93,16 +93,57 @@ class _Resolver(_api.OpenStackAuditMiddleware):
                           target_project)
 
 
+Owner = collections.namedtuple('Owner', ['project_id', 'domain_id', 'data'])
+
+
+class _OwnerCache(object):
+    """Bounded LRU of resource -> (project_id, domain_id, last data).
+
+    Neutron's legacy API controller, which serves routers and BGPVPN
+    resources, does not expose the object it deletes, and a DELETE response
+    has no body. The cache remembers the owner and the last state from the
+    added/updated events this process built, so a later DELETE or member
+    action can use them. Only the publisher thread uses it.
+    """
+
+    def __init__(self, size):
+        self._size = size
+        self._items = collections.OrderedDict()
+
+    def get(self, key):
+        entry = self._items.get(key)
+        if entry is not None:
+            self._items.move_to_end(key)
+        return entry
+
+    def put(self, key, project_id, domain_id, data):
+        old = self._items.pop(key, None)
+        if data is None and old is not None:
+            data = old.data
+        self._items[key] = Owner(project_id, domain_id, data)
+        while len(self._items) > self._size:
+            self._items.popitem(last=False)
+
+    def pop(self, key):
+        self._items.pop(key, None)
+
+
+def _is_admin(roles):
+    return 'admin' in [r.strip().lower() for r in (roles or '').split(',')]
+
+
 class EventBuilder(object):
     """Build CloudEvents for the kinds in the event contract."""
 
     def __init__(self, audit_map_file, region, counters, log,
-                 service_type=None, domain_lookup=None):
+                 service_type=None, domain_lookup=None,
+                 owner_cache_size=10000):
         """Load the audit map and remember the event source identity."""
         self._resolver = _Resolver(audit_map_file, False, False, log)
         self._log = log
         self._counters = counters
         self._domain_lookup = domain_lookup
+        self._owners = _OwnerCache(owner_cache_size)
         self.service_type = service_type or self._resolver._service_type
         self.service_name = self._resolver._service_name
         self.source = 'openstack/%s/%s' % (self.service_name, region)
@@ -136,8 +177,7 @@ class EventBuilder(object):
                                 subaction=res.suffix)
 
         if facts.method == 'DELETE':
-            return self._events(facts, res, kind, DELETED,
-                                [self._last_known(facts, res)])
+            return self._events(facts, res, kind, DELETED, [None])
 
         if facts.method == 'POST' and not res.res_id:
             verb = ADDED
@@ -161,26 +201,32 @@ class EventBuilder(object):
             return []
         return self._events(facts, res, kind, verb, items)
 
-    @staticmethod
-    def _last_known(facts, res):
-        """Return the pre-delete resource if Neutron left it in the env."""
-        for orig in facts.original or []:
-            if isinstance(orig, dict) and orig.get('id') == res.res_id:
-                return orig
-        return None
+    def _owner(self, facts, cached, data):
+        """Return (project_id, domain_id, reason) for the owning project.
 
-    def _owner(self, facts, data):
+        Order: the object's project_id, the cached owner, then the token's
+        project. The token's project is only trusted for non-admin tokens:
+        a non-admin can only change resources of its own project, while an
+        admin may be acting on any project.
+        """
         project_id = None
         if isinstance(data, dict):
             project_id = data.get('project_id') or data.get('tenant_id')
-        project_id = project_id or facts.token_project_id
+        if not project_id and cached is not None:
+            project_id = cached.project_id
         if not project_id:
-            return None, None
+            if _is_admin(facts.roles) or not facts.token_project_id:
+                return None, None, 'owner_unknown'
+            project_id = facts.token_project_id
+        if cached is not None and cached.project_id == project_id:
+            return project_id, cached.domain_id, None
         if project_id == facts.token_project_id and facts.token_domain_id:
-            return project_id, facts.token_domain_id
+            return project_id, facts.token_domain_id, None
         if self._domain_lookup is not None:
-            return project_id, self._domain_lookup(project_id)
-        return project_id, None
+            domain_id = self._domain_lookup(project_id)
+            if domain_id:
+                return project_id, domain_id, None
+        return project_id, None, 'domain_unknown'
 
     def _events(self, facts, res, kind, verb, items, subaction=None):
         events = []
@@ -192,10 +238,22 @@ class EventBuilder(object):
             if not rid or None in segments:
                 self._counters.inc(_metrics.DROPPED, 'unresolved')
                 continue
-            project_id, domain_id = self._owner(facts, data)
-            if not project_id or not domain_id:
-                self._counters.inc(_metrics.DROPPED, 'domain_unknown')
+            key = (kind.name, rid)
+            cached = self._owners.get(key)
+            if verb == DELETED and cached is not None:
+                data = cached.data
+            project_id, domain_id, reason = self._owner(facts, cached, data)
+            if reason:
+                self._counters.inc(_metrics.DROPPED, reason)
+                self._log.info("pheme: dropping %(kind)s %(verb)s for "
+                               "%(id)s: %(reason)s",
+                               {'kind': kind.name, 'verb': verb, 'id': rid,
+                                'reason': reason})
                 continue
+            if verb == DELETED:
+                self._owners.pop(key)
+            else:
+                self._owners.put(key, project_id, domain_id, data)
             path = build_path(['domains', domain_id, 'projects', project_id,
                                self.service_type] + segments)
             events.append(self._cloudevent(facts, kind, verb, path, data,

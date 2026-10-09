@@ -14,7 +14,7 @@
 
 Place the ``pheme`` filter after ``keystonecontext`` (or ``authtoken``) in
 the paste pipeline. On the request thread it only records raw facts about
-successful POST/PUT/PATCH/DELETE requests and hands them to a bounded queue
+successful POST/PUT/PATCH/DELETE requests and hands them to a bounded buffer
 with ``put_nowait``. Resolving the target with the audit map, building the
 CloudEvent and publishing to NATS JetStream all happen on a background
 thread. If the queue is full or NATS is unavailable, events are dropped and
@@ -45,6 +45,7 @@ DEFAULTS = {
     'region': 'local',
     'queue_size': '1000',
     'publish_timeout': '2.0',
+    'owner_cache_size': '10000',
     'metrics_enabled': 'false',
     'keystone_user_domain_name': 'Default',
     'keystone_project_domain_name': 'Default',
@@ -91,7 +92,8 @@ class PhemeMiddleware(object):
             _option(conf, 'region'),
             self.counters, self._log,
             service_type=_option(conf, 'service_type'),
-            domain_lookup=domain_lookup)
+            domain_lookup=domain_lookup,
+            owner_cache_size=int(_option(conf, 'owner_cache_size')))
         servers = [s.strip() for s in _option(conf, 'nats_url').split(',')
                    if s.strip()]
         self.publisher = _publisher.Publisher(
@@ -127,10 +129,6 @@ class PhemeMiddleware(object):
             if (response.content_length != 0 and
                     response.content_type == 'application/json'):
                 body = response.body
-            original = None
-            context = env.get('webob.adhoc_attrs', {}).get('context')
-            if isinstance(context, dict):
-                original = context.get('original_resources')
             facts = _events.Facts(
                 method=req.method,
                 path=req.path,
@@ -139,9 +137,9 @@ class PhemeMiddleware(object):
                 token_project_id=env.get('HTTP_X_PROJECT_ID'),
                 token_domain_id=env.get('HTTP_X_PROJECT_DOMAIN_ID'),
                 user_id=env.get('HTTP_X_USER_ID'),
+                roles=env.get('HTTP_X_ROLES'),
                 request_id=env.get('openstack.request_id'),
-                body=body,
-                original=original)
+                body=body)
             self.publisher.submit(facts)
         except Exception:
             # Pheme must never fail a request that the service handled.

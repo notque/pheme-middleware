@@ -81,19 +81,83 @@ class TestEventBuilder(base.TestCase):
                           base.router(name='renamed'))
 
     def test_router_deleted_with_last_known_state(self):
-        """DELETE uses the pre-delete object Neutron leaves in the env."""
+        """DELETE carries the last state this process saw for the router."""
+        self.builder.build(base.make_facts(
+            'POST', '/v2.0/routers', {'router': base.router()}, 201))
         ev, ce = self.build_one(base.make_facts(
-            'DELETE', '/v2.0/routers/' + base.ROUTER, status=204,
-            original=[base.router()]))
+            'DELETE', '/v2.0/routers/' + base.ROUTER, status=204))
         self.assert_event(ev, ce, 'network.router.deleted', ROUTER_PATH,
                           base.router())
 
     def test_router_deleted_without_state(self):
-        """DELETE without a known state has null data and token owner."""
+        """Non-admin DELETE without cached state: null data, token owner."""
         ev, ce = self.build_one(base.make_facts(
             'DELETE', '/v2.0/routers/' + base.ROUTER, status=204))
         self.assert_event(ev, ce, 'network.router.deleted', ROUTER_PATH,
                           None)
+
+    def test_admin_delete_without_state_is_dropped(self):
+        """An admin DELETE with an unknown owner is dropped, not misfiled."""
+        events = self.builder.build(base.make_facts(
+            'DELETE', '/v2.0/routers/' + base.ROUTER, status=204,
+            roles='admin,member', token_project_id=base.ADMIN_PROJECT,
+            token_domain_id=base.ADMIN_DOMAIN))
+        self.assertEqual([], events)
+        self.assertEqual(1, self.counters.get(_metrics.DROPPED,
+                                              'owner_unknown'))
+
+    def test_admin_delete_uses_cached_owner(self):
+        """An admin DELETE of another project's router uses the cache."""
+        lookups = []
+
+        def lookup(project_id):
+            lookups.append(project_id)
+            return base.OTHER_DOMAIN
+
+        builder = _events.EventBuilder(base.NEUTRON_AUDIT_MAP, 'local',
+                                       self.counters, self.log,
+                                       domain_lookup=lookup)
+        obj = base.router(project_id=base.OTHER_PROJECT,
+                          tenant_id=base.OTHER_PROJECT)
+        admin = dict(roles='admin', token_project_id=base.ADMIN_PROJECT,
+                     token_domain_id=base.ADMIN_DOMAIN)
+        builder.build(base.make_facts('POST', '/v2.0/routers',
+                                      {'router': obj}, 201, **admin))
+        events = builder.build(base.make_facts(
+            'DELETE', '/v2.0/routers/' + base.ROUTER, status=204, **admin))
+        ce = json.loads(events[0].body)
+        self.assertEqual(
+            '/domains/%s/projects/%s/network/routers/%s'
+            % (base.OTHER_DOMAIN, base.OTHER_PROJECT, base.ROUTER),
+            ce['subject'])
+        self.assertEqual(obj, ce['data'])
+        self.assertEqual([base.OTHER_PROJECT], lookups)   # cached after
+        # deleted: forgotten, a second delete has no owner any more
+        self.assertEqual([], builder.build(base.make_facts(
+            'DELETE', '/v2.0/routers/' + base.ROUTER, status=204, **admin)))
+
+    def test_member_action_keeps_cached_state(self):
+        """A member action with no router body does not erase the cache."""
+        self.builder.build(base.make_facts(
+            'POST', '/v2.0/routers', {'router': base.router()}, 201))
+        self.builder.build(base.make_facts(
+            'PUT', '/v2.0/routers/%s/add_router_interface' % base.ROUTER,
+            {'id': base.ROUTER, 'subnet_id': 'sub'}))
+        ev, ce = self.build_one(base.make_facts(
+            'DELETE', '/v2.0/routers/' + base.ROUTER, status=204))
+        self.assertEqual(base.router(), ce['data'])
+
+    def test_owner_cache_is_bounded(self):
+        """The owner cache evicts the least recently used entry."""
+        cache = _events._OwnerCache(2)
+        cache.put('a', 'p', 'd', {'n': 1})
+        cache.put('b', 'p', 'd', None)
+        cache.get('a')
+        cache.put('c', 'p', 'd', None)
+        self.assertIsNone(cache.get('b'))
+        self.assertEqual({'n': 1}, cache.get('a').data)
+        cache.put('a', 'p', 'd', None)
+        self.assertEqual({'n': 1}, cache.get('a').data)
 
     def test_router_add_interface(self):
         """add_router_interface is network.router.updated."""
@@ -160,9 +224,10 @@ class TestEventBuilder(base.TestCase):
 
     def test_bgpvpn_deleted(self):
         """DELETE /bgpvpn/bgpvpns/{id} is network.bgpvpn.deleted."""
+        self.builder.build(base.make_facts(
+            'POST', '/v2.0/bgpvpn/bgpvpns', {'bgpvpn': base.bgpvpn()}, 201))
         ev, ce = self.build_one(base.make_facts(
-            'DELETE', '/v2.0/bgpvpn/bgpvpns/' + base.BGPVPN, status=204,
-            original=[base.bgpvpn()]))
+            'DELETE', '/v2.0/bgpvpn/bgpvpns/' + base.BGPVPN, status=204))
         self.assert_event(ev, ce, 'network.bgpvpn.deleted', BGPVPN_PATH,
                           base.bgpvpn())
 
