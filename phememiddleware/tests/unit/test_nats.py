@@ -34,7 +34,9 @@ import webob
 import webob.dec
 
 import phememiddleware
+from phememiddleware import _events
 from phememiddleware import _metrics
+from phememiddleware import _publisher
 from phememiddleware.tests.unit import base
 
 USER = 'neutron'
@@ -232,6 +234,35 @@ class TestNatsPublish(base.TestCase):
         self.assertEqual(1, len(msgs))
         self.assertEqual('pheme.events.network.bgpvpn', msgs[0].subject)
         self.assertEqual(events[0].msg_id, json.loads(msgs[0].data)['id'])
+
+    def test_resolves_again_after_outage(self):
+        """A dead address is dropped and the name resolved again."""
+        dead = 'nats://127.0.0.1:%d' % base.free_port()
+        answers = [dead]
+
+        def resolve(url):
+            # first resolve points at a dead port, later ones at the server
+            return answers.pop() if answers else self.server.url
+
+        self.useFixture(fixtures.MockPatchObject(
+            _publisher, 'resolve_server', side_effect=resolve))
+
+        def build(facts):
+            return [_events.Event(
+                'pheme.events.network.router', 'id-1',
+                {'Nats-Msg-Id': 'id-1'}, b'{}', 'network.router.added', '/x')]
+
+        pub = _publisher.Publisher(
+            build, ['nats://nats.invalid:4222'], USER, PASSWORD, 0.5, 10,
+            self.counters, self.log, connect_timeout=0.5,
+            reconnect_wait=0.2, resolve_after=1.0)
+        self.addCleanup(pub.stop)
+        pub.submit(base.make_facts('POST', '/v2.0/routers'))
+        self.assertTrue(_wait_for(lambda: pub.connected, timeout=15))
+        pub.submit(base.make_facts('POST', '/v2.0/routers'))
+        self.assertTrue(_wait_for(
+            lambda: self.counters.get(_metrics.PUBLISHED) == 1, timeout=5))
+        self.assertEqual(1, len(_fetch_all(self.server.url)))
 
     def test_publisher_thread_runs_under_eventlet(self):
         """Under eventlet.monkey_patch the publisher is a real OS thread.

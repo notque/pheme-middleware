@@ -60,7 +60,7 @@ class Publisher(object):
     def __init__(self, build, servers, user, password, publish_timeout,
                  queue_size, counters, log, connect_timeout=2.0,
                  reconnect_wait=2.0, poll_interval=0.02,
-                 flush_interval=10.0):
+                 flush_interval=10.0, resolve_after=10.0):
         """Configure the publisher. The thread starts on first submit."""
         self._build = build
         self._servers = servers
@@ -74,6 +74,7 @@ class Publisher(object):
         self._reconnect_wait = reconnect_wait
         self._poll_interval = poll_interval
         self._flush_interval = flush_interval
+        self._resolve_after = resolve_after
 
         self._start_lock = _compat.threading.Lock()
         self._pid = None
@@ -205,33 +206,56 @@ class Publisher(object):
                             {'type': ev.ce_type, 'path': ev.path})
 
     async def _connect_loop(self):
+        # Names are resolved to IPs here (see resolve_server), and nats-py
+        # retries the same IP forever. If NATS comes back on a new IP (a
+        # recreated container), only a fresh resolve finds it, so a connect
+        # attempt is bounded and a client that stays disconnected for
+        # ``resolve_after`` seconds is closed and rebuilt.
+        resolve_after = self._resolve_after
+        disconnected_since = None
         while not self._stopping:
-            if self._nc is None or self._nc.is_closed:
-                try:
-                    servers = [resolve_server(s) for s in self._servers]
-                    nc = await nats.connect(
-                        servers,
-                        user=self._user,
-                        password=self._password,
-                        name='pheme-middleware',
-                        connect_timeout=self._connect_timeout,
-                        allow_reconnect=True,
-                        max_reconnect_attempts=-1,
-                        reconnect_time_wait=self._reconnect_wait,
-                        error_cb=self._on_error,
-                        disconnected_cb=self._on_disconnected,
-                        reconnected_cb=self._on_reconnected)
-                except _NATS_ERRORS as e:
-                    self._log.warning("pheme: cannot connect to NATS "
-                                      "%(servers)s: %(err)r",
-                                      {'servers': self._servers, 'err': e})
-                    await asyncio.sleep(self._reconnect_wait)
-                    continue
-                self._nc = nc
-                self._js = nc.jetstream()
-                self._log.info("pheme: connected to NATS %s",
-                               nc.connected_url.netloc)
-            await asyncio.sleep(1.0)
+            nc = self._nc
+            if nc is not None and not nc.is_closed:
+                if nc.is_connected:
+                    disconnected_since = None
+                elif disconnected_since is None:
+                    disconnected_since = time.monotonic()
+                elif time.monotonic() - disconnected_since > resolve_after:
+                    self._log.warning("pheme: NATS unreachable for %ss, "
+                                      "resolving %s again",
+                                      resolve_after, self._servers)
+                    disconnected_since = None
+                    try:
+                        await asyncio.wait_for(nc.close(), 2.0)
+                    except _NATS_ERRORS:
+                        pass
+                    self._nc = None
+                await asyncio.sleep(1.0)
+                continue
+            try:
+                servers = [resolve_server(s) for s in self._servers]
+                nc = await asyncio.wait_for(nats.connect(
+                    servers,
+                    user=self._user,
+                    password=self._password,
+                    name='pheme-middleware',
+                    connect_timeout=self._connect_timeout,
+                    allow_reconnect=True,
+                    max_reconnect_attempts=-1,
+                    reconnect_time_wait=self._reconnect_wait,
+                    error_cb=self._on_error,
+                    disconnected_cb=self._on_disconnected,
+                    reconnected_cb=self._on_reconnected), resolve_after)
+            except _NATS_ERRORS as e:
+                self._log.warning("pheme: cannot connect to NATS "
+                                  "%(servers)s: %(err)r",
+                                  {'servers': self._servers, 'err': e})
+                await asyncio.sleep(self._reconnect_wait)
+                continue
+            self._nc = nc
+            self._js = nc.jetstream()
+            self._log.info("pheme: connected to NATS %s",
+                           nc.connected_url.netloc)
 
     async def _on_error(self, e):
         # nats-py retries forever and reports every failed attempt here;
