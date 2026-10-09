@@ -24,6 +24,12 @@ ROUTER_PATH = '/domains/%s/projects/%s/network/routers/%s' % (
 BGPVPN_PATH = '/domains/%s/projects/%s/network/bgpvpns/%s' % (
     base.DOMAIN, base.PROJECT, base.BGPVPN)
 ASSOC_PATH = BGPVPN_PATH + '/router_associations/' + base.ASSOC
+NET_ASSOC_PATH = BGPVPN_PATH + '/network_associations/' + base.ASSOC
+PORT_ASSOC_PATH = BGPVPN_PATH + '/port_associations/' + base.ASSOC
+PORT_PATH = '/domains/%s/projects/%s/network/ports/%s' % (
+    base.DOMAIN, base.PROJECT, base.PORT)
+ADMIN = dict(roles='admin,member', token_project_id=base.ADMIN_PROJECT,
+             token_domain_id=base.ADMIN_DOMAIN)
 
 
 class TestEventBuilder(base.TestCase):
@@ -96,15 +102,101 @@ class TestEventBuilder(base.TestCase):
         self.assert_event(ev, ce, 'network.router.deleted', ROUTER_PATH,
                           None)
 
-    def test_admin_delete_without_state_is_dropped(self):
-        """An admin DELETE with an unknown owner is dropped, not misfiled."""
-        events = self.builder.build(base.make_facts(
+    def assert_by_id_delete(self, ev, ce, kind, rid):
+        """Check a contract "Deletes by ID" event."""
+        self.assertEqual('pheme.events.network.' + kind, ev.subject)
+        self.assertEqual('network.%s.deleted' % kind, ce['type'])
+        self.assertEqual('/by-id/network/%s/%s' % (kind, rid), ce['subject'])
+        self.assertEqual(rid, ce['resourceid'])
+        self.assertNotIn('projectid', ce)
+        self.assertNotIn('domainid', ce)
+        self.assertIsNone(ce.get('data'))
+        self.assertEqual('pheme:schema/network.%s/v1' % kind,
+                         ce['dataschema'])
+
+    def test_admin_delete_without_state_is_by_id(self):
+        """An admin DELETE with an unknown owner is a by-ID delete."""
+        ev, ce = self.build_one(base.make_facts(
+            'DELETE', '/v2.0/routers/' + base.ROUTER, status=204, **ADMIN))
+        self.assert_by_id_delete(ev, ce, 'router', base.ROUTER)
+        self.assertEqual(1, self.counters.get(_metrics.BY_ID))
+        self.assertEqual(0, self.counters.get(_metrics.DROPPED,
+                                              'owner_unknown'))
+
+    def test_admin_delete_by_id_for_every_kind(self):
+        """By-ID deletes use the kind name and the resource ID."""
+        cases = [
+            ('/v2.0/bgpvpn/bgpvpns/' + base.BGPVPN, 'bgpvpn', base.BGPVPN),
+            ('/v2.0/bgpvpn/bgpvpns/%s/router_associations/%s'
+             % (base.BGPVPN, base.ASSOC), 'bgpvpn_router_association',
+             base.ASSOC),
+            ('/v2.0/bgpvpn/bgpvpns/%s/network_associations/%s'
+             % (base.BGPVPN, base.ASSOC), 'bgpvpn_network_association',
+             base.ASSOC),
+            ('/v2.0/bgpvpn/bgpvpns/%s/port_associations/%s'
+             % (base.BGPVPN, base.ASSOC), 'bgpvpn_port_association',
+             base.ASSOC),
+            ('/v2.0/ports/' + base.PORT, 'port', base.PORT),
+        ]
+        for path, kind, rid in cases:
+            ev, ce = self.build_one(base.make_facts(
+                'DELETE', path, status=204, **ADMIN))
+            self.assert_by_id_delete(ev, ce, kind, rid)
+
+    def test_delete_with_failed_domain_lookup_is_by_id(self):
+        """A cached owner whose domain is unknown still yields a by-ID."""
+        builder = _events.EventBuilder(base.NEUTRON_AUDIT_MAP, 'local',
+                                       self.counters, self.log,
+                                       domain_lookup=lambda p: None)
+        ev = builder.build(base.make_facts(
             'DELETE', '/v2.0/routers/' + base.ROUTER, status=204,
-            roles='admin,member', token_project_id=base.ADMIN_PROJECT,
-            token_domain_id=base.ADMIN_DOMAIN))
+            token_project_id=base.OTHER_PROJECT,
+            token_domain_id=None))[0]
+        self.assert_by_id_delete(ev, json.loads(ev.body), 'router',
+                                 base.ROUTER)
+
+    def test_admin_member_action_uses_body_owner(self):
+        """add_router_interface by admin takes the owner from the body."""
+        lookups = []
+
+        def lookup(project_id):
+            lookups.append(project_id)
+            return base.OTHER_DOMAIN
+
+        builder = _events.EventBuilder(base.NEUTRON_AUDIT_MAP, 'local',
+                                       self.counters, self.log,
+                                       domain_lookup=lookup)
+        body = {'id': base.ROUTER, 'subnet_id': 's', 'port_id': 'p',
+                'project_id': base.OTHER_PROJECT,
+                'tenant_id': base.OTHER_PROJECT}
+        ev = builder.build(base.make_facts(
+            'PUT', '/v2.0/routers/%s/add_router_interface' % base.ROUTER,
+            body, **ADMIN))[0]
+        ce = json.loads(ev.body)
+        self.assertEqual(
+            '/domains/%s/projects/%s/network/routers/%s'
+            % (base.OTHER_DOMAIN, base.OTHER_PROJECT, base.ROUTER),
+            ce['subject'])
+        self.assertIsNone(ce.get('data'))
+        self.assertEqual('add_router_interface', ce['subaction'])
+
+    def test_admin_member_action_without_owner_is_dropped(self):
+        """A member action with no owner anywhere is dropped, not misfiled."""
+        events = self.builder.build(base.make_facts(
+            'PUT', '/v2.0/routers/%s/add_router_interface' % base.ROUTER,
+            {'id': base.ROUTER}, **ADMIN))
         self.assertEqual([], events)
         self.assertEqual(1, self.counters.get(_metrics.DROPPED,
                                               'owner_unknown'))
+
+    def test_subaction_is_a_top_level_extension(self):
+        """The subaction is a top-level lowercase CloudEvents extension."""
+        ev = self.builder.build(base.make_facts(
+            'PUT', '/v2.0/routers/%s/remove_router_interface' % base.ROUTER,
+            {'id': base.ROUTER, 'project_id': base.PROJECT}))[0]
+        ce = json.loads(ev.body)
+        self.assertEqual('remove_router_interface', ce['subaction'])
+        self.assertNotIn('subaction', ce.get('data') or {})
 
     def test_admin_delete_uses_cached_owner(self):
         """An admin DELETE of another project's router uses the cache."""
@@ -119,8 +211,7 @@ class TestEventBuilder(base.TestCase):
                                        domain_lookup=lookup)
         obj = base.router(project_id=base.OTHER_PROJECT,
                           tenant_id=base.OTHER_PROJECT)
-        admin = dict(roles='admin', token_project_id=base.ADMIN_PROJECT,
-                     token_domain_id=base.ADMIN_DOMAIN)
+        admin = ADMIN
         builder.build(base.make_facts('POST', '/v2.0/routers',
                                       {'router': obj}, 201, **admin))
         events = builder.build(base.make_facts(
@@ -132,9 +223,11 @@ class TestEventBuilder(base.TestCase):
             ce['subject'])
         self.assertEqual(obj, ce['data'])
         self.assertEqual([base.OTHER_PROJECT], lookups)   # cached after
-        # deleted: forgotten, a second delete has no owner any more
-        self.assertEqual([], builder.build(base.make_facts(
-            'DELETE', '/v2.0/routers/' + base.ROUTER, status=204, **admin)))
+        # deleted: forgotten, a second delete is by ID
+        ev = builder.build(base.make_facts(
+            'DELETE', '/v2.0/routers/' + base.ROUTER, status=204, **admin))[0]
+        self.assertEqual('/by-id/network/router/' + base.ROUTER,
+                         json.loads(ev.body)['subject'])
 
     def test_member_action_keeps_cached_state(self):
         """A member action with no router body does not erase the cache."""
@@ -263,6 +356,104 @@ class TestEventBuilder(base.TestCase):
                           'network.bgpvpn_router_association.deleted',
                           ASSOC_PATH, None)
 
+    def test_network_association_lifecycle(self):
+        """Network associations: added, updated, deleted."""
+        obj = {'id': base.ASSOC, 'network_id': base.NETWORK,
+               'project_id': base.PROJECT}
+        path = ('/v2.0/bgpvpn/bgpvpns/%s/network_associations'
+                % base.BGPVPN)
+        ev, ce = self.build_one(base.make_facts(
+            'POST', path, {'network_association': obj}, 201))
+        self.assert_event(ev, ce,
+                          'network.bgpvpn_network_association.added',
+                          NET_ASSOC_PATH, obj)
+        ev, ce = self.build_one(base.make_facts(
+            'PUT', path + '/' + base.ASSOC, {'network_association': obj}))
+        self.assertEqual('network.bgpvpn_network_association.updated',
+                         ce['type'])
+        ev, ce = self.build_one(base.make_facts(
+            'DELETE', path + '/' + base.ASSOC, status=204))
+        self.assert_event(ev, ce,
+                          'network.bgpvpn_network_association.deleted',
+                          NET_ASSOC_PATH, obj)
+
+    def test_port_association_lifecycle(self):
+        """Port associations: added, updated, deleted."""
+        obj = {'id': base.ASSOC, 'port_id': base.PORT,
+               'project_id': base.PROJECT, 'routes': []}
+        path = '/v2.0/bgpvpn/bgpvpns/%s/port_associations' % base.BGPVPN
+        ev, ce = self.build_one(base.make_facts(
+            'POST', path, {'port_association': obj}, 201))
+        self.assert_event(ev, ce, 'network.bgpvpn_port_association.added',
+                          PORT_ASSOC_PATH, obj)
+        ev, ce = self.build_one(base.make_facts(
+            'PUT', path + '/' + base.ASSOC, {'port_association': obj}))
+        self.assertEqual('network.bgpvpn_port_association.updated',
+                         ce['type'])
+        ev, ce = self.build_one(base.make_facts(
+            'DELETE', path + '/' + base.ASSOC, status=204))
+        self.assertEqual('network.bgpvpn_port_association.deleted',
+                         ce['type'])
+        self.assertEqual(PORT_ASSOC_PATH, ce['subject'])
+
+    # ports
+
+    def test_port_lifecycle(self):
+        """Ports: added, updated, deleted with the port object."""
+        ev, ce = self.build_one(base.make_facts(
+            'POST', '/v2.0/ports', {'port': base.port()}, 201))
+        self.assert_event(ev, ce, 'network.port.added', PORT_PATH,
+                          base.port())
+        ev, ce = self.build_one(base.make_facts(
+            'PUT', '/v2.0/ports/' + base.PORT,
+            {'port': base.port(name='renamed')}))
+        self.assert_event(ev, ce, 'network.port.updated', PORT_PATH,
+                          base.port(name='renamed'))
+        ev, ce = self.build_one(base.make_facts(
+            'DELETE', '/v2.0/ports/' + base.PORT, status=204))
+        self.assert_event(ev, ce, 'network.port.deleted', PORT_PATH,
+                          base.port(name='renamed'))
+
+    def test_port_bulk_create(self):
+        """A bulk port POST yields one event per port."""
+        p2 = base.port(id='88888888-8888-8888-8888-888888888888')
+        events = self.builder.build(base.make_facts(
+            'POST', '/v2.0/ports', {'ports': [base.port(), p2]}, 201))
+        self.assertEqual(
+            [PORT_PATH, PORT_PATH.replace(base.PORT, p2['id'])],
+            [e.path for e in events])
+        self.assertEqual(['network.port.added'] * 2,
+                         [e.ce_type for e in events])
+
+    def test_port_owner_is_the_port_project(self):
+        """A port in a network owned by another project uses its own owner.
+
+        The token belongs to the network owner; the port belongs to
+        OTHER_PROJECT, so the path is OTHER_PROJECT's.
+        """
+        builder = _events.EventBuilder(base.NEUTRON_AUDIT_MAP, 'local',
+                                       self.counters, self.log,
+                                       domain_lookup=lambda p:
+                                       base.OTHER_DOMAIN)
+        obj = base.port(project_id=base.OTHER_PROJECT,
+                        tenant_id=base.OTHER_PROJECT)
+        ev = builder.build(base.make_facts('PUT', '/v2.0/ports/' + base.PORT,
+                                           {'port': obj}))[0]
+        ce = json.loads(ev.body)
+        self.assertEqual(base.OTHER_PROJECT, ce['projectid'])
+        self.assertEqual(base.OTHER_DOMAIN, ce['domainid'])
+        self.assertEqual(
+            '/domains/%s/projects/%s/network/ports/%s'
+            % (base.OTHER_DOMAIN, base.OTHER_PROJECT, base.PORT),
+            ce['subject'])
+
+    def test_port_children_are_ignored(self):
+        """Port bindings and tags are not port events."""
+        for path in ('/v2.0/ports/%s/tags/foo' % base.PORT,
+                     '/v2.0/ports/%s/bindings' % base.PORT):
+            self.assertEqual([], self.builder.build(
+                base.make_facts('PUT', path, None)), path)
+
     # owner and domain
 
     def test_cross_project_uses_domain_lookup(self):
@@ -317,13 +508,11 @@ class TestEventBuilder(base.TestCase):
     # things that are not in the contract
 
     def test_other_resources_are_ignored(self):
-        """Networks, ports and router tags are not contract kinds."""
+        """Networks, subnets and router tags are not contract kinds."""
         cases = [
             ('POST', '/v2.0/networks', {'network': {'id': 'n1'}}),
-            ('PUT', '/v2.0/ports/' + base.ROUTER, {'port': {'id': 'p'}}),
+            ('POST', '/v2.0/subnets', {'subnet': {'id': 's1'}}),
             ('PUT', '/v2.0/routers/%s/tags/foo' % base.ROUTER, None),
-            ('POST', '/v2.0/bgpvpn/bgpvpns/%s/network_associations'
-             % base.BGPVPN, {'network_association': {'id': base.ASSOC}}),
         ]
         for method, path, body in cases:
             self.assertEqual([], self.builder.build(

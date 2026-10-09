@@ -18,6 +18,7 @@ import os
 from phememiddleware import _compat
 
 PUBLISHED = 'published'
+BY_ID = 'by_id_delete'
 DROPPED = 'dropped'
 
 

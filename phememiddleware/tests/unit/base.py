@@ -39,6 +39,8 @@ USER = 'c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3'
 ROUTER = '11111111-1111-1111-1111-111111111111'
 BGPVPN = '22222222-2222-2222-2222-222222222222'
 ASSOC = '33333333-3333-3333-3333-333333333333'
+PORT = '66666666-6666-6666-6666-666666666666'
+NETWORK = '77777777-7777-7777-7777-777777777777'
 REQUEST_ID = 'req-44444444-4444-4444-4444-444444444444'
 NOW = datetime.datetime(2026, 10, 9, 10, 0, 0, 123456,
                         tzinfo=datetime.timezone.utc)
@@ -67,6 +69,16 @@ def router_association(**kw):
     """Return a BGPVPN router association object."""
     obj = {'id': ASSOC, 'router_id': ROUTER, 'project_id': PROJECT,
            'tenant_id': PROJECT, 'advertise_extra_routes': True}
+    obj.update(kw)
+    return obj
+
+
+def port(**kw):
+    """Return a port object as Neutron returns it."""
+    obj = {'id': PORT, 'name': 'port1', 'network_id': NETWORK,
+           'project_id': PROJECT, 'tenant_id': PROJECT,
+           'mac_address': 'fa:16:3e:00:00:01', 'device_owner': '',
+           'fixed_ips': [{'subnet_id': 's1', 'ip_address': '10.0.0.5'}]}
     obj.update(kw)
     return obj
 

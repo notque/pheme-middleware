@@ -54,11 +54,19 @@ Kind = collections.namedtuple('Kind', ['name', 'segments'])
 KINDS = {
     'network/router': Kind(
         'router', lambda rid, pid: ['routers', rid]),
+    'network/port': Kind(
+        'port', lambda rid, pid: ['ports', rid]),
     'network/bgpvpn': Kind(
         'bgpvpn', lambda rid, pid: ['bgpvpns', rid]),
     'network/bgpvpn/router-association': Kind(
         'bgpvpn_router_association',
         lambda rid, pid: ['bgpvpns', pid, 'router_associations', rid]),
+    'network/bgpvpn/network-association': Kind(
+        'bgpvpn_network_association',
+        lambda rid, pid: ['bgpvpns', pid, 'network_associations', rid]),
+    'network/bgpvpn/port-association': Kind(
+        'bgpvpn_port_association',
+        lambda rid, pid: ['bgpvpns', pid, 'port_associations', rid]),
 }
 
 # Kinds whose member actions (PUT /routers/{id}/add_router_interface)
@@ -99,11 +107,12 @@ Owner = collections.namedtuple('Owner', ['project_id', 'domain_id', 'data'])
 class _OwnerCache(object):
     """Bounded LRU of resource -> (project_id, domain_id, last data).
 
-    Neutron's legacy API controller, which serves routers and BGPVPN
-    resources, does not expose the object it deletes, and a DELETE response
-    has no body. The cache remembers the owner and the last state from the
-    added/updated events this process built, so a later DELETE or member
-    action can use them. Only the publisher thread uses it.
+    An optimization only. Neutron's legacy API controller (routers, BGPVPN)
+    does not expose the object it deletes and a DELETE has no body. When
+    this process built an event for the resource before, the delete gets the
+    full path and the last state from here; otherwise it is published as a
+    by-ID delete and Pheme resolves it. Owners never change, so entries are
+    safe across uwsgi workers. Only the publisher thread uses it.
     """
 
     def __init__(self, size):
@@ -173,8 +182,10 @@ class EventBuilder(object):
             if isinstance(body, dict) and isinstance(
                     body.get(res.res_spec.el_type_name), dict):
                 data = body[res.res_spec.el_type_name]
+            # add/remove_router_interface return the router's project_id
+            hint = data if data is not None else body
             return self._events(facts, res, kind, UPDATED, [data],
-                                subaction=res.suffix)
+                                subaction=res.suffix, owner_hint=hint)
 
         if facts.method == 'DELETE':
             return self._events(facts, res, kind, DELETED, [None])
@@ -228,7 +239,8 @@ class EventBuilder(object):
                 return project_id, domain_id, None
         return project_id, None, 'domain_unknown'
 
-    def _events(self, facts, res, kind, verb, items, subaction=None):
+    def _events(self, facts, res, kind, verb, items, subaction=None,
+                owner_hint=None):
         events = []
         for data in items:
             rid = res.res_id
@@ -242,7 +254,13 @@ class EventBuilder(object):
             cached = self._owners.get(key)
             if verb == DELETED and cached is not None:
                 data = cached.data
-            project_id, domain_id, reason = self._owner(facts, cached, data)
+            project_id, domain_id, reason = self._owner(
+                facts, cached, owner_hint if owner_hint is not None else data)
+            if reason and verb == DELETED:
+                # Owner or domain unknown: let Pheme resolve the path by ID.
+                self._counters.inc(_metrics.BY_ID)
+                events.append(self._by_id_delete(facts, kind, rid))
+                continue
             if reason:
                 self._counters.inc(_metrics.DROPPED, reason)
                 self._log.info("pheme: dropping %(kind)s %(verb)s for "
@@ -260,8 +278,14 @@ class EventBuilder(object):
                                            project_id, domain_id, subaction))
         return events
 
+    def _by_id_delete(self, facts, kind, rid):
+        """Build a contract "Deletes by ID" event (no owner, no data)."""
+        path = build_path(['by-id', self.service_type, kind.name, rid])
+        return self._cloudevent(facts, kind, DELETED, path, None, None, None,
+                                None, resource_id=rid)
+
     def _cloudevent(self, facts, kind, verb, path, data, project_id,
-                    domain_id, subaction):
+                    domain_id, subaction, resource_id=None):
         full_kind = '%s.%s' % (self.service_type, kind.name)
         ce_type = '%s.%s' % (full_kind, verb)
         attrs = {
@@ -272,9 +296,12 @@ class EventBuilder(object):
             'time': _format_time(facts.time),
             'datacontenttype': 'application/json',
             'dataschema': 'pheme:schema/%s/v1' % full_kind,
-            'projectid': project_id,
-            'domainid': domain_id,
         }
+        if project_id:
+            attrs['projectid'] = project_id
+            attrs['domainid'] = domain_id
+        if resource_id:
+            attrs['resourceid'] = resource_id
         if facts.request_id:
             attrs['requestid'] = facts.request_id
         if facts.user_id:
