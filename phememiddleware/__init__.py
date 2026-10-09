@@ -79,13 +79,14 @@ class PhemeMiddleware(object):
             self._log.info("pheme middleware disabled")
             return
 
-        domain_lookup = _keystone.create_lookup(
+        domain_lookup, owner_lookup = _keystone.create_lookups(
             _option(conf, 'keystone_auth_url'),
             _option(conf, 'keystone_username'),
             _option(conf, 'keystone_password'),
             _option(conf, 'keystone_project_name'),
             _option(conf, 'keystone_user_domain_name'),
             _option(conf, 'keystone_project_domain_name'),
+            _option(conf, 'keystone_region_name'),
             self._log)
         self.builder = _events.EventBuilder(
             _option(conf, 'audit_map_file'),
@@ -93,6 +94,7 @@ class PhemeMiddleware(object):
             self.counters, self._log,
             service_type=_option(conf, 'service_type'),
             domain_lookup=domain_lookup,
+            owner_lookup=owner_lookup,
             owner_cache_size=int(_option(conf, 'owner_cache_size')))
         servers = [s.strip() for s in _option(conf, 'nats_url').split(',')
                    if s.strip()]

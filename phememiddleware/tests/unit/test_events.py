@@ -13,6 +13,7 @@
 """Event content per kind and verb, and the contract paths."""
 
 import json
+from unittest import mock
 import uuid
 
 from phememiddleware import _events
@@ -395,6 +396,68 @@ class TestEventBuilder(base.TestCase):
         self.assertEqual('network.bgpvpn_port_association.deleted',
                          ce['type'])
         self.assertEqual(PORT_ASSOC_PATH, ce['subject'])
+
+    def test_admin_association_owner_from_cached_parent(self):
+        """An association without project_id inherits the BGPVPN owner."""
+        lookup = mock.Mock(return_value=base.OTHER_DOMAIN)
+        builder = _events.EventBuilder(base.NEUTRON_AUDIT_MAP, 'local',
+                                       self.counters, self.log,
+                                       domain_lookup=lookup)
+        vpn = base.bgpvpn(project_id=base.OTHER_PROJECT,
+                          tenant_id=base.OTHER_PROJECT)
+        builder.build(base.make_facts('POST', '/v2.0/bgpvpn/bgpvpns',
+                                      {'bgpvpn': vpn}, 201, **ADMIN))
+        assoc = {'id': base.ASSOC, 'router_id': base.ROUTER}
+        ev = builder.build(base.make_facts(
+            'POST', '/v2.0/bgpvpn/bgpvpns/%s/router_associations'
+            % base.BGPVPN, {'router_association': assoc}, 201, **ADMIN))[0]
+        ce = json.loads(ev.body)
+        self.assertEqual(
+            '/domains/%s/projects/%s/network/bgpvpns/%s/router_associations'
+            '/%s' % (base.OTHER_DOMAIN, base.OTHER_PROJECT, base.BGPVPN,
+                     base.ASSOC), ce['subject'])
+        self.assertEqual(assoc, ce['data'])
+        lookup.assert_called_once_with(base.OTHER_PROJECT)
+
+    def test_admin_association_owner_from_neutron_lookup(self):
+        """Without a cached parent, the BGPVPN owner is looked up."""
+        owner_lookup = mock.Mock(return_value=base.OTHER_PROJECT)
+        builder = _events.EventBuilder(
+            base.NEUTRON_AUDIT_MAP, 'local', self.counters, self.log,
+            domain_lookup=lambda p: base.OTHER_DOMAIN,
+            owner_lookup=owner_lookup)
+        ev = builder.build(base.make_facts(
+            'POST', '/v2.0/bgpvpn/bgpvpns/%s/port_associations'
+            % base.BGPVPN, {'port_association': {'id': base.ASSOC,
+                                                 'port_id': base.PORT}},
+            201, **ADMIN))[0]
+        ce = json.loads(ev.body)
+        owner_lookup.assert_called_once_with('bgpvpn/bgpvpns', 'bgpvpn',
+                                             base.BGPVPN)
+        self.assertEqual(base.OTHER_PROJECT, ce['projectid'])
+        self.assertEqual(base.OTHER_DOMAIN, ce['domainid'])
+
+    def test_member_association_without_project_uses_token(self):
+        """A member's association without project_id is the token's."""
+        ev, ce = self.build_one(base.make_facts(
+            'POST', '/v2.0/bgpvpn/bgpvpns/%s/network_associations'
+            % base.BGPVPN, {'network_association': {
+                'id': base.ASSOC, 'network_id': base.NETWORK}}, 201))
+        self.assertEqual(NET_ASSOC_PATH, ce['subject'])
+
+    def test_admin_association_without_any_owner(self):
+        """No project, no parent, admin token: dropped; delete is by ID."""
+        path = ('/v2.0/bgpvpn/bgpvpns/%s/router_associations'
+                % base.BGPVPN)
+        self.assertEqual([], self.builder.build(base.make_facts(
+            'POST', path, {'router_association': {'id': base.ASSOC}}, 201,
+            **ADMIN)))
+        self.assertEqual(1, self.counters.get(_metrics.DROPPED,
+                                              'owner_unknown'))
+        ev, ce = self.build_one(base.make_facts(
+            'DELETE', path + '/' + base.ASSOC, status=204, **ADMIN))
+        self.assert_by_id_delete(ev, ce, 'bgpvpn_router_association',
+                                 base.ASSOC)
 
     # ports
 

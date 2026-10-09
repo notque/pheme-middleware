@@ -10,11 +10,16 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Project to domain lookup for cross-project requests.
+"""Owner lookups on the publisher thread, with service credentials.
 
-Only used on the publisher thread, when the owning project differs from the
-token's project. A project's domain never changes, so successful lookups are
-cached for the life of the process.
+- ``DomainLookup``: project -> domain in Keystone, when the owning project
+  differs from the token's project.
+- ``OwnerLookup``: resource -> project_id in Neutron, for child resources
+  whose API object has no project_id (BGPVPN associations: their owner is
+  the parent BGPVPN's).
+
+Owners and domains never change, so successful lookups are cached for the
+life of the process. Never used on the request thread.
 """
 
 from keystoneauth1 import exceptions as ks_exc
@@ -52,13 +57,54 @@ class DomainLookup(object):
         return domain_id
 
 
-def create_lookup(auth_url, username, password, project_name,
-                  user_domain_name, project_domain_name, log):
-    """Build a DomainLookup from service credentials, or None."""
+class OwnerLookup(object):
+    """Look up a Neutron resource's project_id, with a permanent cache."""
+
+    def __init__(self, session, log, region=None, timeout=2.0):
+        """Use an authenticated keystoneauth1 session."""
+        self._session = session
+        self._log = log
+        self._region = region
+        self._timeout = timeout
+        self._cache = {}
+
+    def __call__(self, collection, resource, resource_id):
+        """Return project_id of ``/v2.0/<collection>/<id>``, or None."""
+        key = (collection, resource_id)
+        if key in self._cache:
+            return self._cache[key]
+        try:
+            resp = self._session.get(
+                '/v2.0/%s/%s' % (collection, resource_id),
+                endpoint_filter={'service_type': 'network',
+                                 'interface': 'public',
+                                 'region_name': self._region},
+                timeout=self._timeout)
+            obj = resp.json()[resource]
+            project_id = obj.get('project_id') or obj.get('tenant_id')
+        except (ks_exc.ClientException, ValueError, KeyError,
+                AttributeError) as e:
+            self._log.warning("pheme: owner lookup for %(c)s/%(id)s failed: "
+                              "%(err)r", {'c': collection, 'id': resource_id,
+                                          'err': e})
+            return None
+        if project_id:
+            self._cache[key] = project_id
+        return project_id
+
+
+def create_lookups(auth_url, username, password, project_name,
+                   user_domain_name, project_domain_name, region, log):
+    """Build (DomainLookup, OwnerLookup) from service credentials.
+
+    Returns (None, None) if no credentials are configured.
+    """
     if not (auth_url and username and password):
-        return None
+        return None, None
     auth = v3.Password(auth_url=auth_url, username=username,
                        password=password, project_name=project_name,
                        user_domain_name=user_domain_name,
                        project_domain_name=project_domain_name)
-    return DomainLookup(ks_session.Session(auth=auth), log)
+    session = ks_session.Session(auth=auth)
+    return (DomainLookup(session, log),
+            OwnerLookup(session, log, region=region))

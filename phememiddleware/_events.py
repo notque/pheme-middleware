@@ -48,8 +48,12 @@ Event = collections.namedtuple('Event', [
     'subject', 'msg_id', 'headers', 'body', 'ce_type', 'path'])
 
 # Contract kinds, keyed by the audit map element type URI.
-# Each entry: kind name, function (res_id, parent_id) -> path segments.
-Kind = collections.namedtuple('Kind', ['name', 'segments'])
+# Each entry: kind name, function (res_id, parent_id) -> path segments, and
+# for child kinds the parent (kind name, API collection, API object name)
+# that owns them when the child's API object has no project_id.
+Kind = collections.namedtuple('Kind', ['name', 'segments', 'parent'])
+Kind.__new__.__defaults__ = (None,)
+_BGPVPN_PARENT = ('bgpvpn', 'bgpvpn/bgpvpns', 'bgpvpn')
 
 KINDS = {
     'network/router': Kind(
@@ -60,13 +64,16 @@ KINDS = {
         'bgpvpn', lambda rid, pid: ['bgpvpns', rid]),
     'network/bgpvpn/router-association': Kind(
         'bgpvpn_router_association',
-        lambda rid, pid: ['bgpvpns', pid, 'router_associations', rid]),
+        lambda rid, pid: ['bgpvpns', pid, 'router_associations', rid],
+        _BGPVPN_PARENT),
     'network/bgpvpn/network-association': Kind(
         'bgpvpn_network_association',
-        lambda rid, pid: ['bgpvpns', pid, 'network_associations', rid]),
+        lambda rid, pid: ['bgpvpns', pid, 'network_associations', rid],
+        _BGPVPN_PARENT),
     'network/bgpvpn/port-association': Kind(
         'bgpvpn_port_association',
-        lambda rid, pid: ['bgpvpns', pid, 'port_associations', rid]),
+        lambda rid, pid: ['bgpvpns', pid, 'port_associations', rid],
+        _BGPVPN_PARENT),
 }
 
 # Kinds whose member actions (PUT /routers/{id}/add_router_interface)
@@ -146,12 +153,13 @@ class EventBuilder(object):
 
     def __init__(self, audit_map_file, region, counters, log,
                  service_type=None, domain_lookup=None,
-                 owner_cache_size=10000):
+                 owner_lookup=None, owner_cache_size=10000):
         """Load the audit map and remember the event source identity."""
         self._resolver = _Resolver(audit_map_file, False, False, log)
         self._log = log
         self._counters = counters
         self._domain_lookup = domain_lookup
+        self._owner_lookup = owner_lookup
         self._owners = _OwnerCache(owner_cache_size)
         self.service_type = service_type or self._resolver._service_type
         self.service_name = self._resolver._service_name
@@ -212,25 +220,41 @@ class EventBuilder(object):
             return []
         return self._events(facts, res, kind, verb, items)
 
-    def _owner(self, facts, cached, data):
+    def _parent_owner(self, kind, parent_id):
+        """Return the cached or looked-up owner of a child's parent."""
+        if kind.parent is None or not parent_id:
+            return None
+        parent_kind, collection, resource = kind.parent
+        cached = self._owners.get((parent_kind, parent_id))
+        if cached is not None:
+            return cached
+        if self._owner_lookup is not None:
+            project_id = self._owner_lookup(collection, resource, parent_id)
+            if project_id:
+                return Owner(project_id, None, None)
+        return None
+
+    def _owner(self, facts, cached, data, parent=None):
         """Return (project_id, domain_id, reason) for the owning project.
 
-        Order: the object's project_id, the cached owner, then the token's
-        project. The token's project is only trusted for non-admin tokens:
-        a non-admin can only change resources of its own project, while an
-        admin may be acting on any project.
+        Order: the object's project_id, the cached owner, the parent's owner
+        (BGPVPN associations), then the token's project. The token's project
+        is only trusted for non-admin tokens: a non-admin can only change
+        resources of its own project, an admin may act on any project.
         """
         project_id = None
         if isinstance(data, dict):
             project_id = data.get('project_id') or data.get('tenant_id')
-        if not project_id and cached is not None:
-            project_id = cached.project_id
+        known = [o for o in (cached, parent) if o is not None]
+        if not project_id and known:
+            project_id = known[0].project_id
         if not project_id:
             if _is_admin(facts.roles) or not facts.token_project_id:
                 return None, None, 'owner_unknown'
             project_id = facts.token_project_id
-        if cached is not None and cached.project_id == project_id:
-            return project_id, cached.domain_id, None
+        for o in known:
+            if o.project_id == project_id and o.domain_id:
+                return project_id, o.domain_id, None
         if project_id == facts.token_project_id and facts.token_domain_id:
             return project_id, facts.token_domain_id, None
         if self._domain_lookup is not None:
@@ -254,8 +278,14 @@ class EventBuilder(object):
             cached = self._owners.get(key)
             if verb == DELETED and cached is not None:
                 data = cached.data
-            project_id, domain_id, reason = self._owner(
-                facts, cached, owner_hint if owner_hint is not None else data)
+            hint = owner_hint if owner_hint is not None else data
+            parent = None
+            if (cached is None and kind.parent is not None and
+                    not (isinstance(hint, dict) and
+                         (hint.get('project_id') or hint.get('tenant_id')))):
+                parent = self._parent_owner(kind, res.res_parent_id)
+            project_id, domain_id, reason = self._owner(facts, cached, hint,
+                                                        parent)
             if reason and verb == DELETED:
                 # Owner or domain unknown: let Pheme resolve the path by ID.
                 self._counters.inc(_metrics.BY_ID)
