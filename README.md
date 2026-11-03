@@ -1,6 +1,6 @@
 # pheme-middleware
 
-A paste filter for OpenStack APIs that publishes a CloudEvent to NATS JetStream for every successful change to a Pheme kind. Pheme is the watch API prototype; the event contract is `docs/event-contract.md` in the pheme-build repo. It resolves request paths with the public audit map parser of the audit middleware (`auditmiddleware.auditmap.Resolver`). It is independent of the CADF audit filter and changes nothing about it.
+A paste filter for OpenStack APIs that publishes a CloudEvent to NATS JetStream for every successful change to a Pheme kind. Pheme is the watch API prototype; the event contract is `docs/event-contract.md` in the pheme-build repo. It resolves request paths with the audit middleware's audit map parser, copied into `phememiddleware/_auditmap.py`, so it reads the same `*_audit_map.yaml` files the same way. It is independent of the CADF audit filter, changes nothing about it and does not need it installed.
 
 Kinds (neutron): `network.router`, `network.port`, `network.bgpvpn`, `network.bgpvpn_router_association`, `network.bgpvpn_network_association`, `network.bgpvpn_port_association`.
 
@@ -67,17 +67,20 @@ With `stats_file` (for example `/var/lib/pheme-stats/neutron-{pid}.json`), the p
 
 Neutron's API monkey-patches with eventlet, under both the eventlet server and uwsgi `neutron-api`. A greenthread publisher would starve under uwsgi between requests, so the publisher is a real OS thread: `eventlet.patcher.original('threading')`, a real selector, and NATS names resolved with the unpatched resolver. The thread starts lazily in each worker; a pid check handles forked workers. uwsgi needs Python threads (`enable-threads = true`; uWSGI 2.0.31 always has them on).
 
+## Audit map parser
+
+`phememiddleware/_auditmap.py` is the path parser from `auditmiddleware/_api.py` in [sapcc/openstack-audit-middleware](https://github.com/sapcc/openstack-audit-middleware), extracted into a `Resolver` that returns the resource spec, ID, parent ID, suffix and URL project instead of building CADF events. It matches upstream master `d87988b9877a`. Keep the code identical to the upstream logic so the two filters in one pipeline agree on every path.
+
+`tests/unit/test_auditmap_drift.py` resolves real Neutron, Cinder and Nova paths against upstream's own `etc/*_audit_map.yaml` (copied into `tests/unit/upstream/`) and pins the results that upstream's parser gives. When upstream's `_api.py` or its maps change, refresh the fixtures as described at the top of that test and port the parser change into `_auditmap.py`.
+
 ## Development
 
-The parser comes from the sibling clone of `notque/pheme-audit-middleware` (dist name `audit-middleware`). For development, install it in editable mode next to this repo:
-
 ```sh
-git clone https://github.com/notque/pheme-audit-middleware ../openstack-audit-middleware
 python -m venv .venv && . .venv/bin/activate
-pip install -e ../openstack-audit-middleware -e . -r test-requirements.txt
+pip install -e . -r test-requirements.txt
 stestr run
 ```
 
-Or run `tox -e py3,pep8`. tox installs `../openstack-audit-middleware` in editable mode; set `AUDIT_MIDDLEWARE_SRC` to use another path.
+Or run `tox -e py3,pep8`.
 
 `test_nats` needs a nats-server. It uses `PHEME_TEST_NATS_URL`, a `nats-server` binary, or docker (`nats:2.10-alpine`), and skips if none of them is available.

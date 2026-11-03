@@ -21,9 +21,9 @@ import json
 import urllib.parse
 import uuid
 
-from auditmiddleware import auditmap
 import webob
 
+from phememiddleware import _auditmap
 from phememiddleware import _metrics
 
 try:
@@ -142,8 +142,8 @@ class EventBuilder(object):
                  service_type=None, domain_lookup=None,
                  owner_lookup=None, owner_cache_size=10000):
         """Load the audit map and remember the event source identity."""
-        # the public audit map parser from openstack-audit-middleware
-        self._resolver = auditmap.Resolver(audit_map_file, log)
+        # the audit middleware's audit map parser, copied into _auditmap
+        self._resolver = _auditmap.Resolver(audit_map_file, log)
         self._log = log
         self._counters = counters
         self._domain_lookup = domain_lookup
