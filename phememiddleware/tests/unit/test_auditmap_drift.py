@@ -20,7 +20,10 @@ returns for each path.
 
 To refresh:
 
-1. Copy those three files from upstream master into upstream/ and set
+1. In a clone of upstream, run
+   ``git log <UPSTREAM_COMMIT>..<new> -- auditmiddleware/_api.py etc/``.
+   If it prints nothing, only UPSTREAM_COMMIT needs updating. Otherwise
+   copy those three files from upstream at <new> into upstream/ and set
    UPSTREAM_COMMIT.
 2. Install upstream master into a scratch venv and resolve every path in
    CASES with it: build OpenStackAuditMiddleware(map_file, False, False),
@@ -113,6 +116,18 @@ CASES = [
     ('neutron', 'POST', '/v2.0/widgets',
      ('network/Xwidgets', 'network/Xwidget', None, None, None, None)),
     ('neutron', 'POST', '/v3/routers', None),
+    # the prefix only matches at the start of the path
+    ('neutron', 'POST', '/v3/v2.0/routers', None),
+    # a trailing slash is stripped
+    ('neutron', 'POST', '/v2.0/routers/',
+     _ROUTERS + (None, None, None, None)),
+    # unknown children below an element keep the element's ID as parent
+    ('neutron', 'PUT', '/v2.0/ports/%s/foo/bar/baz' % PORT,
+     ('network/port/Xfo/Xbar', 'network/port/Xfo/Xba', None, PORT, 'baz',
+      None)),
+    # a known child name right after a collection is the child, not an ID
+    ('neutron', 'GET', '/v2.0/ports/tags',
+     ('network/port/tags', 'network/port/tag', None, None, None, None)),
     # cinder: the prefix captures the target project
     ('cinder', 'POST', '/v3/%s/volumes' % PROJECT,
      _VOLUMES + (None, None, None, PROJECT)),
@@ -135,6 +150,9 @@ CASES = [
     ('nova', 'POST', '/v2.1/os-aggregates/7/action',
      ('compute/aggregates', 'compute/aggregate', '7', None, 'action',
       None)),
+    # unknown resources lose an os- prefix and get '-' for '_'
+    ('nova', 'POST', '/v2.1/os-foo_bar',
+     ('compute/Xfoo-bar', 'compute/Xfoo-ba', None, None, None, None)),
 ]
 
 

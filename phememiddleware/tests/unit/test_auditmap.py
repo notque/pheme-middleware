@@ -61,7 +61,7 @@ class TestResolver(oslotest.BaseTestCase):
         self.assertEqual('add_router_interface', res.suffix)
 
     def test_child_with_parent(self):
-        """Children carry the parent ID through singleton namespaces."""
+        """Association children carry the bgpvpn ID as parent."""
         res = self.resolve('/v2.0/bgpvpn/bgpvpns/%s/router_associations/%s'
                            % (B, R))
         self.assertEqual('network/bgpvpn/router-association',

@@ -71,7 +71,14 @@ Neutron's API monkey-patches with eventlet, under both the eventlet server and u
 
 `phememiddleware/_auditmap.py` is the path parser from `auditmiddleware/_api.py` in [sapcc/openstack-audit-middleware](https://github.com/sapcc/openstack-audit-middleware), extracted into a `Resolver` that returns the resource spec, ID, parent ID, suffix and URL project instead of building CADF events. It matches upstream master `d87988b9877a`. Keep the code identical to the upstream logic so the two filters in one pipeline agree on every path.
 
-`tests/unit/test_auditmap_drift.py` resolves real Neutron, Cinder and Nova paths against upstream's own `etc/*_audit_map.yaml` (copied into `tests/unit/upstream/`) and pins the results that upstream's parser gives. When upstream's `_api.py` or its maps change, refresh the fixtures as described at the top of that test and port the parser change into `_auditmap.py`.
+The code is the extraction from our former fork (`auditmiddleware/auditmap.py` at `0d9540d`) unchanged apart from the module docstring, so it diffs cleanly against that file. Against upstream `_api.py` it differs only by these renames:
+
+- `OpenStackAuditMiddleware.create_events` → `Resolver.resolve`
+- `_build_events` → `_walk`, without the `response` argument
+- `_create_events(...)` at the end of the path → `Resolution(...)`
+- `_service_type`, `_service_name`, `_resource_specs` → `service_type`, `service_name`, `resource_specs`
+
+`tests/unit/test_auditmap_drift.py` resolves real Neutron, Cinder and Nova paths against upstream's own `etc/*_audit_map.yaml` (copied into `tests/unit/upstream/`) and pins the results that upstream's parser gives. To pick up upstream changes, run `git log d87988b9877a..<new> -- auditmiddleware/_api.py etc/` in a clone of upstream. If it prints nothing, only `UPSTREAM_COMMIT` in the drift test needs updating. Otherwise port the parser change into `_auditmap.py` with the renames above and refresh the fixtures as described at the top of that test.
 
 ## Development
 

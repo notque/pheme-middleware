@@ -29,10 +29,25 @@ sapcc/openstack-audit-middleware (``_build_audit_map``, ``_build_res_spec``,
 ``_build_events``, ``register_resource``, ``_handle_url_prefix``), extracted
 into a ``Resolver`` that returns a ``Resolution`` instead of building CADF
 events. It matches upstream master d87988b9877a (unchanged in _api.py since
-211c39868bd4, the commit it was extracted from). The code below is that
-extraction unchanged apart from this docstring; keep it that way so it
-diffs cleanly against upstream. ``tests/unit/test_auditmap_drift.py``
-checks it against upstream's own audit maps.
+211c39868bd4, the commit it was extracted from).
+
+The code below is the extraction from our former fork
+(``auditmiddleware/auditmap.py`` at 0d9540d) unchanged apart from this
+docstring, so it diffs cleanly against that file. Against upstream
+``_api.py`` it differs only by these renames:
+
+- ``OpenStackAuditMiddleware.create_events`` -> ``Resolver.resolve``
+- ``_build_events`` -> ``_walk``, without the ``response`` argument
+- ``_create_events(...)`` at the end of the path -> ``Resolution(...)``
+- ``_service_type``, ``_service_name``, ``_resource_specs`` ->
+  ``service_type``, ``service_name``, ``resource_specs``
+
+To pick up upstream changes, run
+``git log d87988b9877a..<new> -- auditmiddleware/_api.py etc/`` in a clone
+of upstream. If it prints nothing, only the drift test's UPSTREAM_COMMIT
+needs updating; otherwise port the parser change here with the renames
+above and refresh the fixtures as ``tests/unit/test_auditmap_drift.py``
+describes. That test checks the parser against upstream's own audit maps.
 """
 
 import collections
